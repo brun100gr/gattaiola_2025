@@ -1,51 +1,70 @@
 #include <WiFi.h>
+#include <WebServer.h>
+
 #include "secrets.h"
+#include "html.h"
 
-const int wifiCount = sizeof(wifiList) / sizeof(wifiList[0]);
-void connectToWiFi() {
-  int attempt = 0;
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print("Attempting to connect to WiFi... ");
-    Serial.println(wifiList[attempt][0]);
+WebServer server(80);
 
-    WiFi.config(INADDR_NONE, INADDR_NONE, IPAddress(8, 8, 8, 8)); // Usa il DNS di Google
-    WiFi.begin(wifiList[attempt][0], wifiList[attempt][1]);
+// Variabili per l'allarme (inizialmente invalide)
+//int alarmHour = -1;
+//int alarmMinute = -1;
 
-    int timeout = 10; // Timeout in seconds
-    while (WiFi.status() != WL_CONNECTED && timeout > 0) {
-      delay(1000);
-      Serial.print(".");
-      timeout--;
+int alarmHour = 7;
+int alarmMinute = 30;
+
+String getAlarmTime() {
+    if(alarmHour < 0 || alarmHour > 23 || alarmMinute < 0 || alarmMinute > 59) {
+        return "--:--";
     }
+    return String(alarmHour).c_str() + String(":") + String(alarmMinute).c_str();
+}
 
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nConnected to WiFi!");
-      Serial.print("SSID: ");
-      Serial.println(WiFi.SSID());
-      Serial.print("IP Address: ");
-      Serial.println(WiFi.localIP());
-      return;
+void handleRoot() {
+    String page = HTML;
+    page.replace("%ALARM_TIME%", getAlarmTime());
+    server.send(200, "text/html", page);
+}
+
+void handleSetAlarm() {
+    int hour = server.arg("hour").toInt();
+    int minute = server.arg("minute").toInt();
+    
+    if(hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        alarmHour = hour;
+        alarmMinute = minute;
+        server.send(200, "text/plain", "ok");
+        
+        // Versione corretta per interi:
+        Serial.printf("Sveglia impostata alle: %02d:%02d\n", hour, minute);
     } else {
-      Serial.println("\nConnection failed.");
-      attempt = (attempt + 1) % wifiCount; // Try the next SSID
+        server.send(400, "text/plain", "invalid");
     }
-  }
+}
+
+void handleGetAlarm() {
+    server.send(200, "text/plain", getAlarmTime());
 }
 
 void setup() {
-  // Serial comunication initialization
-  Serial.begin(115200);
-
-  // Initial connection to WiFi
-  connectToWiFi();
-
+    Serial.begin(115200);
+  
+    // Connessione WiFi
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    
+    Serial.println("\nConnesso! IP:");
+    Serial.println(WiFi.localIP());
+    
+    server.on("/", handleRoot);
+    server.on("/set_alarm", handleSetAlarm);
+    server.on("/get_alarm", handleGetAlarm);
+    server.begin();
 }
 
 void loop() {
-  // Check the WiFi connection status
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi connection lost. Attempting to reconnect...");
-    connectToWiFi();
-  }
+    server.handleClient();
 }
