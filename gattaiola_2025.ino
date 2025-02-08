@@ -45,6 +45,10 @@ void loadConfig() {
   ssid.toCharArray(wifiConfig.ssid, sizeof(wifiConfig.ssid));
   password.toCharArray(wifiConfig.password, sizeof(wifiConfig.password));
   Serial.println("WiFi configuration loaded.");
+  Serial.print("Loaded SSID: ");
+  Serial.println(wifiConfig.ssid);
+  Serial.print("Loaded Password: ");
+  Serial.println(wifiConfig.password);
 }
 
 // Function to clear all preferences
@@ -88,6 +92,13 @@ void startAP() {
     ESP.restart();  // Restart the device to apply the new configuration
   });
 
+  server.on("/clear", HTTP_POST, []() {  // Add a new route for clearing preferences
+    clearAllPreferences();  // Clear all saved preferences
+    server.send(200, "text/plain", "Dati salvati eliminati! Riavvio...");  // Send confirmation
+    delay(1000);  // Wait for the response to be sent
+    ESP.restart();  // Restart the device
+  });
+
   apMode = true;  // Set AP mode flag
   server.begin();  // Start the web server
   Serial.println("Access Point mode started.");
@@ -118,7 +129,7 @@ void connectWiFi() {
   }
 
   // 2. If saved credentials fail, try predefined networks from secrets.h
-  Serial.println("\nScanning predefined networks...");
+  Serial.println("\nSaved credentials doesn't work!\nScanning predefined networks...");
   for (int i = 0; i < wifiCount; i++) {
     Serial.print("Trying: ");
     Serial.println(wifiList[i][0]);  // Print SSID being tried
@@ -154,19 +165,21 @@ void connectWiFi() {
 void setup() {
   Serial.begin(115200);  // Initialize serial communication
   Serial.println("Setup started.");
-  // clearAllPreferences();  // Clear saved preferences
+  clearAllPreferences();  // Clear saved preferences
   loadConfig();  // Load saved WiFi credentials
 
-  if (strlen(wifiConfig.ssid) > 0) {
-    connectWiFi();  // Try connecting with saved credentials
-  } else {
-    startAP();  // Start AP mode if no credentials are saved
-  }
+  connectWiFi();  // Try connecting with saved credentials
 
   if (!apMode) {
     // Define routes for the web server in normal mode
     server.on("/", []() {
       server.send(200, "text/plain", "Benvenuto nel dispositivo ESP32!");  // Welcome message
+    });
+    server.on("/clear", HTTP_POST, []() {  // Add the route in normal mode as well
+      clearAllPreferences();  // Clear all saved preferences
+      server.send(200, "text/plain", "Dati salvati eliminati! Riavvio...");  // Send confirmation
+      delay(1000);  // Wait for the response to be sent
+      ESP.restart();  // Restart the device
     });
     server.begin();  // Start the web server
     Serial.println("Web server started in normal mode.");
