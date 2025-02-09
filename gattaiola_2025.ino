@@ -8,6 +8,8 @@
 
 #define MAX_RETRIES 5  // Maximum number of connection retries before starting AP mode
 
+const int SWITCH_PIN = 4;       // GPIO collegato allo switch
+
 WebServer server(80);  // Web server running on port 80
 Preferences preferences;  // Used for persistent storage of WiFi credentials
 
@@ -211,6 +213,15 @@ void connectWiFi() {
 void setup() {
   Serial.begin(115200);  // Initialize serial communication
   Serial.println("Setup started.");
+
+  // Start AP if button is pressed at startup
+  pinMode(SWITCH_PIN, INPUT_PULLUP); // Configura il pin con pull-up interno
+  if (digitalRead(SWITCH_PIN) == LOW) {
+    apMode = true;
+    startAP();
+    return;
+  }
+
   clearAllPreferences();  // Clear saved preferences
   loadConfig();  // Load saved WiFi credentials
 
