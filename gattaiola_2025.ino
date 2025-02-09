@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include "html_wifi_configuration.h"  // HTML content for the configuration page
 #include "secrets.h"  // File containing predefined WiFi networks (SSID and password)
+#include "html_set_alarm.h"  // HTML content for the alarm configuration page
 
 #define MAX_RETRIES 5  // Maximum number of connection retries before starting AP mode
 
@@ -22,6 +23,10 @@ struct WiFiConfig {
 int connectionRetries = 0;  // Counter for connection retries
 bool apMode = false;  // Flag to indicate if the device is in Access Point mode
 const char AP_SSID_PREFIX[] = "ESP32-Config-";  // Prefix for the AP SSID
+
+// Variables for the alarm (initially set to 7:30)
+int alarmHour = 7;
+int alarmMinute = 30;
 
 // Function to save WiFi credentials to persistent storage
 void saveConfig() {
@@ -60,6 +65,41 @@ void clearAllPreferences() {
   Serial.println("All preferences cleared.");
 }
 
+// Function to get the current alarm time as a string
+String getAlarmTime() {
+  if (alarmHour < 0 || alarmHour > 23 || alarmMinute < 0 || alarmMinute > 59) {
+    return "--:--";
+  }
+  return String(alarmHour).c_str() + String(":") + String(alarmMinute).c_str();
+}
+
+// Handler for setting the alarm
+void handleSetAlarm() {
+  int hour = server.arg("hour").toInt();
+  int minute = server.arg("minute").toInt();
+
+  if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+    alarmHour = hour;
+    alarmMinute = minute;
+    server.send(200, "text/plain", "ok");
+    Serial.printf("Sveglia impostata alle: %02d:%02d\n", hour, minute);
+  } else {
+    server.send(400, "text/plain", "invalid");
+  }
+}
+
+// Handler for getting the current alarm time
+void handleGetAlarm() {
+  server.send(200, "text/plain", getAlarmTime());
+}
+
+// Handler for the root URL (serves the alarm configuration page)
+void handleRoot() {
+  String page = HTML;
+  page.replace("%ALARM_TIME%", getAlarmTime());
+  server.send(200, "text/html", page);
+}
+
 // Function to start Access Point (AP) mode
 void startAP() {
   Serial.println("Starting Access Point mode...");
@@ -74,7 +114,9 @@ void startAP() {
 
   // Define routes for the web server in AP mode
   server.on("/", []() {
-    server.send(200, "text/html", CONFIG_HTML);  // Serve the configuration page
+    String page = CONFIG_HTML;
+    page.replace("%ALARM_TIME%", getAlarmTime());
+    server.send(200, "text/html", page);  // Serve the configuration page
   });
 
   server.on("/configure", HTTP_POST, []() {
@@ -98,6 +140,10 @@ void startAP() {
     delay(1000);  // Wait for the response to be sent
     ESP.restart();  // Restart the device
   });
+
+  server.on("/get_alarm", handleGetAlarm);  // Handle getting the current alarm time
+
+  server.on("/set_alarm", handleSetAlarm);  // Handle setting the alarm
 
   apMode = true;  // Set AP mode flag
   server.begin();  // Start the web server
@@ -171,10 +217,12 @@ void setup() {
   connectWiFi();  // Try connecting with saved credentials
 
   if (!apMode) {
+    Serial.print("Connected! IP address: ");
+    Serial.println(WiFi.localIP());
     // Define routes for the web server in normal mode
-    server.on("/", []() {
-      server.send(200, "text/plain", "Benvenuto nel dispositivo ESP32!");  // Welcome message
-    });
+    server.on("/", handleRoot);  // Serve the alarm configuration page
+    server.on("/set_alarm", handleSetAlarm);  // Handle setting the alarm
+    server.on("/get_alarm", handleGetAlarm);  // Handle getting the current alarm time
     server.on("/clear", HTTP_POST, []() {  // Add the route in normal mode as well
       clearAllPreferences();  // Clear all saved preferences
       server.send(200, "text/plain", "Dati salvati eliminati! Riavvio...");  // Send confirmation
