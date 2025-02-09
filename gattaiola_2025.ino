@@ -130,29 +130,29 @@ void connectWiFi() {
 
   // 2. If saved credentials fail, try predefined networks from secrets.h
   Serial.println("\nSaved credentials doesn't work!\nScanning predefined networks...");
-  for (int i = 0; i < wifiCount; i++) {
-    Serial.print("Trying: ");
-    Serial.println(wifiList[i][0]);  // Print SSID being tried
+  int attempts = 0;  // Counter for connection attempts
+  for (int j = 0; j < MAX_RETRIES; j++) {
+    for (int i = 0; i < wifiCount; i++) {
+      Serial.printf("Trying: %s (attempt %d of %d\n)", wifiList[i][0], j + 1, MAX_RETRIES); // Print SSID being tried
 
-    // Configure DNS (optional, using Google DNS)
-    WiFi.config(INADDR_NONE, INADDR_NONE, IPAddress(8, 8, 8, 8));
-    WiFi.begin(wifiList[i][0], wifiList[i][1]);  // Connect to the predefined network
+      WiFi.begin(wifiList[i][0], wifiList[i][1]);  // Connect to the predefined network
 
-    int timeout = 10;  // Timeout for connection attempt (10 seconds)
-    while (WiFi.status() != WL_CONNECTED && timeout-- > 0) {
-      delay(1000);  // Wait 1 second between retries
-      Serial.print(".");
-    }
+      int timeout = 20;  // Timeout for connection attempt (10 seconds)
+      while (WiFi.status() != WL_CONNECTED && timeout-- > 0) {
+        delay(1000);  // Wait 1 second between retries
+        Serial.print(".");
+      }
 
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nConnected to predefined network!");
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nConnected to predefined network!");
 
-      // Save the working credentials
-      strncpy(wifiConfig.ssid, wifiList[i][0], sizeof(wifiConfig.ssid));
-      strncpy(wifiConfig.password, wifiList[i][1], sizeof(wifiConfig.password));
-      saveConfig();  // Save the new credentials
+        // Save the working credentials
+        strncpy(wifiConfig.ssid, wifiList[i][0], sizeof(wifiConfig.ssid));
+        strncpy(wifiConfig.password, wifiList[i][1], sizeof(wifiConfig.password));
+        saveConfig();  // Save the new credentials
 
-      return;  // Exit if connected successfully
+        return;  // Exit if connected successfully
+      }
     }
   }
 
