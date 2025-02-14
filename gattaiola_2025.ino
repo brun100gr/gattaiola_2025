@@ -8,8 +8,6 @@
 
 #define MAX_RETRIES 5  // Maximum number of connection retries before starting AP mode
 
-const int SWITCH_PIN = 4;       // GPIO collegato allo switch
-
 WebServer server(80);  // Web server running on port 80
 Preferences preferences;  // Used for persistent storage of WiFi credentials
 
@@ -29,6 +27,52 @@ const char AP_SSID_PREFIX[] = "ESP32-Config-";  // Prefix for the AP SSID
 // Variables for the alarm (initially set to 7:30)
 int alarmHour = 7;
 int alarmMinute = 30;
+
+// Pin definitions for gate control
+const int MOTOR_PWMA = 26;     // PWM motor
+const int MOTOR_AIN1 = 13;     // Direction 1
+const int MOTOR_AIN2 = 14;     // Direction 2
+const int MOTOR_STBY = 33;     // STANDBY
+const int BUTTON_PIN = 25;      // Manual button
+const int LIMIT_OPEN = 27;     // Limit switch open
+const int LIMIT_CLOSE = 32;    // Limit switch close
+
+// States and directions
+enum GateState { CLOSED, OPEN, MOVING };
+enum Direction { STOPPED, OPENING, CLOSING };
+volatile GateState currentState = CLOSED;
+volatile Direction currentDirection = STOPPED;
+bool targetStateChanged = false;
+
+// Debounce variables
+#define DEBOUNCE_DELAY 50  // Debounce delay in milliseconds
+
+bool buttonState = HIGH;  // Current button state
+bool lastButtonState = HIGH;  // Last button state
+unsigned long lastDebounceTime = 0;  // Last debounce time
+
+// Motor parameters
+const int motorSpeed = 255;    // Speed 0-255
+
+void IRAM_ATTR limitOpenISR() {
+  //Serial.println("[INTERRUPT] Limit switch OPEN.");
+  if (currentDirection == OPENING) {
+    stopMotor();
+    currentState = OPEN;
+    currentDirection = STOPPED;
+    //Serial.println("[INTERRUPT] Limit switch OPEN reached. Gate fully open.");
+  }
+}
+
+void IRAM_ATTR limitCloseISR() {
+  //Serial.println("[INTERRUPT] Limit switch CLOSE.");
+  if (currentDirection == CLOSING) {
+    stopMotor();
+    currentState = CLOSED;
+    currentDirection = STOPPED;
+    //Serial.println("[INTERRUPT] Limit switch CLOSE reached. Gate fully closed.");
+  }
+}
 
 // Function to save WiFi credentials to persistent storage
 void saveConfig() {
@@ -215,8 +259,8 @@ void setup() {
   Serial.println("Setup started.");
 
   // Start AP if button is pressed at startup
-  pinMode(SWITCH_PIN, INPUT_PULLUP); // Configura il pin con pull-up interno
-  if (digitalRead(SWITCH_PIN) == LOW) {
+  pinMode(BUTTON_PIN, INPUT_PULLUP); // Configura il pin con pull-up interno
+  if (digitalRead(BUTTON_PIN) == LOW) {
     apMode = true;
     startAP();
     return;
@@ -243,6 +287,29 @@ void setup() {
     server.begin();  // Start the web server
     Serial.println("Web server started in normal mode.");
   }
+
+  // Motor pin configuration
+  pinMode(MOTOR_PWMA, OUTPUT);
+  pinMode(MOTOR_AIN1, OUTPUT);
+  pinMode(MOTOR_AIN2, OUTPUT);
+  pinMode(MOTOR_STBY, OUTPUT);
+
+  // Enable Motor
+  digitalWrite(MOTOR_STBY, HIGH);
+
+  // Button and limit switch configuration
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LIMIT_OPEN, INPUT_PULLUP);
+  pinMode(LIMIT_CLOSE, INPUT_PULLUP);
+
+  // Interrupts for limit switches
+  attachInterrupt(digitalPinToInterrupt(LIMIT_OPEN), limitOpenISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(LIMIT_CLOSE), limitCloseISR, FALLING);
+
+  // Initialize motor stopped
+  stopMotor();
+  Serial.println("System ready. Initial state: CLOSED.");
+
   Serial.println("Setup completed.");
 }
 
@@ -255,5 +322,110 @@ void loop() {
       connectionRetries = 0;  // Reset the retry counter
     }
   }
+  Serial.printf("Current state: %d\n", currentState);
+  Serial.printf("Current direction: %d\n", currentDirection);
+  
+  checkButton();
+  executeMovement();
   server.handleClient();  // Handle incoming client requests
+}
+
+// Function to check the button state with debounce
+void checkButton() {
+  int reading = digitalRead(BUTTON_PIN);  // Read the current button state
+
+  // If the state has changed, reset the debounce timer
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+
+  // If the time elapsed exceeds the debounce delay
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    // If the button state has changed
+    if (reading != buttonState) {
+      buttonState = reading;
+
+      // If the button was pressed (transition HIGH -> LOW)
+      if (buttonState == LOW) {
+        Serial.println("[BUTTON] Pressed!");
+        handleButtonPress();  // Function to handle button press
+      }
+
+      // If the button was released (transition LOW -> HIGH)
+      else {
+        Serial.println("[BUTTON] Released!");
+      }
+    }
+  }
+
+  lastButtonState = reading;  // Update the last state
+}
+
+// Function to handle button press
+void handleButtonPress() {
+  if (currentState == MOVING) {
+    Serial.println("[MOVEMENT] Button pressed during movement. Reversing direction...");
+    if (currentDirection == OPENING) {
+      Serial.println("[MOVEMENT] Reversing direction: closing.");
+      closeGate();
+    } else if (currentDirection == CLOSING) {
+      Serial.println("[MOVEMENT] Reversing direction: opening.");
+      openGate();
+    }
+  } else {
+    Serial.println("[MOVEMENT] Button pressed at rest. Changing state...");
+    toggleGate();
+  }
+}
+
+// Function to toggle the gate state
+void toggleGate() {
+  if (currentState == CLOSED) {
+    Serial.println("[MOVEMENT] Gate closed. Command to open.");
+    openGate();
+  } else if (currentState == OPEN) {
+    Serial.println("[MOVEMENT] Gate open. Command to close.");
+    closeGate();
+  }
+}
+
+// Function to execute movement logic
+void executeMovement() {
+  // Additional logic during movement (if needed)
+}
+
+// Function to open the gate
+void openGate() {
+  if (currentState != OPEN) {
+    currentState = MOVING;
+    currentDirection = OPENING;
+    Serial.println("[MOVEMENT] Starting gate opening...");
+    digitalWrite(MOTOR_AIN1, HIGH);
+    digitalWrite(MOTOR_AIN2, LOW);
+    analogWrite(MOTOR_PWMA, motorSpeed);
+  } else {
+    Serial.println("[MOVEMENT] Gate already open. No action.");
+  }
+}
+
+// Function to close the gate
+void closeGate() {
+  if (currentState != CLOSED) {
+    currentState = MOVING;
+    currentDirection = CLOSING;
+    Serial.println("[MOVEMENT] Starting gate closing...");
+    digitalWrite(MOTOR_AIN1, LOW);
+    digitalWrite(MOTOR_AIN2, HIGH);
+    analogWrite(MOTOR_PWMA, motorSpeed);
+  } else {
+    Serial.println("[MOVEMENT] Gate already closed. No action.");
+  }
+}
+
+// Function to stop the motor
+void stopMotor() {
+  analogWrite(MOTOR_PWMA, 0);
+  digitalWrite(MOTOR_AIN1, LOW);
+  digitalWrite(MOTOR_AIN2, LOW);
+  Serial.println("[MOVEMENT] Motor stopped.");
 }
