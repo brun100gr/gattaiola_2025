@@ -60,12 +60,13 @@ int alarmHour = 7;
 int alarmMinute = 30;
 
 // Pin definitions for gate control
-const int MOTOR_PWMA = 12;     // PWM motor
-const int MOTOR_AIN1 = 14;     // Direction 1
-const int MOTOR_AIN2 = 27;     // Direction 2
-const int BUTTON_PIN = 5;      // Manual button
-const int LIMIT_OPEN = 18;     // Limit switch open
-const int LIMIT_CLOSE = 19;    // Limit switch close
+const int MOTOR_PWMA = 26;     // PWM motor
+const int MOTOR_AIN1 = 13;     // Direction 1
+const int MOTOR_AIN2 = 14;     // Direction 2
+const int MOTOR_STBY = 33;
+const int BUTTON_PIN = 25;      // Manual button
+const int LIMIT_OPEN = 27;     // Limit switch open
+const int LIMIT_CLOSE = 32;    // Limit switch close
 
 // States and directions
 enum GateState { CLOSED, OPEN, MOVING };
@@ -82,25 +83,27 @@ bool lastButtonState = HIGH;  // Last button state
 unsigned long lastDebounceTime = 0;  // Last debounce time
 
 // Motor parameters
-const int motorSpeed = 128;    // Speed 0-255
+const int motorSpeed = 255;    // Speed 0-255
 
 void IRAM_ATTR limitOpenISR() {
-  Serial.println("[INTERRUPT] Limit switch OPEN.");
+  // Serial.println("[INTERRUPT] Limit switch OPEN.");
   if (currentDirection == OPENING) {
     stopMotor();
     currentState = OPEN;
     currentDirection = STOPPED;
-    Serial.println("[INTERRUPT] Limit switch OPEN reached. Gate fully open.");
+    digitalWrite(MOTOR_STBY, LOW);
+    // Serial.println("[INTERRUPT] Limit switch OPEN reached. Gate fully open.");
   }
 }
 
 void IRAM_ATTR limitCloseISR() {
-  Serial.println("[INTERRUPT] Limit switch CLOSE.");
+  // Serial.println("[INTERRUPT] Limit switch CLOSE.");
   if (currentDirection == CLOSING) {
     stopMotor();
     currentState = CLOSED;
     currentDirection = STOPPED;
-    Serial.println("[INTERRUPT] Limit switch CLOSE reached. Gate fully closed.");
+    digitalWrite(MOTOR_STBY, LOW);
+    // Serial.println("[INTERRUPT] Limit switch CLOSE reached. Gate fully closed.");
   }
 }
 // Function to save WiFi credentials to persistent storage
@@ -383,6 +386,7 @@ void setup() {
   pinMode(MOTOR_PWMA, OUTPUT);
   pinMode(MOTOR_AIN1, OUTPUT);
   pinMode(MOTOR_AIN2, OUTPUT);
+  pinMode(MOTOR_STBY, OUTPUT);
 
   // Button and limit switch configuration
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -393,9 +397,19 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(LIMIT_OPEN), limitOpenISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(LIMIT_CLOSE), limitCloseISR, FALLING);
 
+  if (digitalRead(LIMIT_OPEN) == LOW) {
+    currentState = OPEN;
+    Serial.println("Gate OPEN");
+  } else if (digitalRead(LIMIT_CLOSE) == LOW) {
+    currentState = CLOSED;
+    Serial.println("Gate CLOSE");
+  } else {
+    Serial.println("Gate position UNKNOWN.");
+  }
+
+
   // Initialize motor stopped
   stopMotor();
-  Serial.println("System ready. Initial state: CLOSED.");
 
   Serial.println("Setup completed.");
 }
@@ -492,8 +506,9 @@ void openGate() {
     currentState = MOVING;
     currentDirection = OPENING;
     Serial.println("[MOVEMENT] Starting gate opening...");
-    digitalWrite(MOTOR_AIN1, HIGH);
-    digitalWrite(MOTOR_AIN2, LOW);
+    digitalWrite(MOTOR_AIN1, LOW);
+    digitalWrite(MOTOR_AIN2, HIGH);
+    digitalWrite(MOTOR_STBY, HIGH);
     analogWrite(MOTOR_PWMA, motorSpeed);
   } else {
     Serial.println("[MOVEMENT] Gate already open. No action.");
@@ -506,8 +521,9 @@ void closeGate() {
     currentState = MOVING;
     currentDirection = CLOSING;
     Serial.println("[MOVEMENT] Starting gate closing...");
-    digitalWrite(MOTOR_AIN1, LOW);
-    digitalWrite(MOTOR_AIN2, HIGH);
+    digitalWrite(MOTOR_AIN1, HIGH);
+    digitalWrite(MOTOR_AIN2, LOW);
+    digitalWrite(MOTOR_STBY, HIGH);
     analogWrite(MOTOR_PWMA, motorSpeed);
   } else {
     Serial.println("[MOVEMENT] Gate already closed. No action.");
