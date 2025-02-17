@@ -357,9 +357,13 @@ void setup() {
   Serial.begin(115200);  // Initialize serial communication
   Serial.println("Setup started.");
 
-  // Start AP if button is pressed at startup
-  pinMode(BUTTON_PIN, INPUT_PULLUP); // Configura il pin con pull-up interno
-  if (digitalRead(BUTTON_PIN) == LOW) {
+  // Button and limit switches configuration
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LIMIT_OPEN, INPUT_PULLUP);
+  pinMode(LIMIT_CLOSE, INPUT_PULLUP);
+
+  // Start in Access Point mode if both limits are pressed
+  if ((digitalRead(LIMIT_OPEN) == LOW) && (digitalRead(LIMIT_CLOSE) == LOW)) {
     apMode = true;
     startAP();
     return;
@@ -388,11 +392,6 @@ void setup() {
   pinMode(MOTOR_AIN2, OUTPUT);
   pinMode(MOTOR_STBY, OUTPUT);
 
-  // Button and limit switch configuration
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(LIMIT_OPEN, INPUT_PULLUP);
-  pinMode(LIMIT_CLOSE, INPUT_PULLUP);
-
   // Interrupts for limit switches
   attachInterrupt(digitalPinToInterrupt(LIMIT_OPEN), limitOpenISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(LIMIT_CLOSE), limitCloseISR, FALLING);
@@ -406,7 +405,6 @@ void setup() {
   } else {
     Serial.println("Gate position UNKNOWN.");
   }
-
 
   // Initialize motor stopped
   stopMotor();
