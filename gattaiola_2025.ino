@@ -5,8 +5,17 @@
 #include "html_wifi_configuration.h"  // HTML content for the configuration page
 #include "secrets.h"  // File containing predefined WiFi networks (SSID and password)
 #include "html_set_alarm.h"  // HTML content for the alarm configuration page
+#include <NTPClient.h>      // Library to get time via NTP
+#include <WiFiUdp.h>        // UDP library for NTPClient
 
 #define MAX_RETRIES 5  // Maximum number of connection retries before starting AP mode
+
+// NTP synchronization settings
+#define NTP_TIMEOUT 2000    // Timeout for each NTP attempt (2000 ms)
+#define NTP_RETRIES 3       // Number of attempts for each NTP server
+#define NTP_INTERVAL 3600   // Interval between syncs (3600 seconds = 1 hour)
+
+const int SWITCH_PIN = 4;       // GPIO collegato allo switch
 
 WebServer server(80);  // Web server running on port 80
 Preferences preferences;  // Used for persistent storage of WiFi credentials
@@ -14,6 +23,30 @@ Preferences preferences;  // Used for persistent storage of WiFi credentials
 // List of predefined WiFi networks from secrets.h
 const int wifiCount = sizeof(wifiList) / sizeof(wifiList[0]);
 
+// List of NTP servers in priority order
+const char* ntpServers[] = {
+  "pool.ntp.org",          // Main server (global)
+  "europe.pool.ntp.org",   // European server
+  "time.google.com",       // Google NTP server
+  "ntp1.inrim.it"          // Italian NTP server (INRIM)
+};
+const int numNtpServers = sizeof(ntpServers) / sizeof(ntpServers[0]);
+
+// Enumeration representing the time synchronization status
+enum SyncStatus {
+  SYNC_IN_PROGRESS,  // Sync in progress
+  SYNC_OK,           // Sync successful
+  SYNC_FAIL          // Sync failed
+};
+
+// UDP object for NTP communication
+WiFiUDP ntpUDP;
+
+// NTP client instance using the ntpUDP object
+NTPClient timeClient(ntpUDP);
+
+// Global variable to store the sync status (initially failed)
+volatile SyncStatus timeSyncStatus = SYNC_FAIL;
 // Structure to store WiFi credentials
 struct WiFiConfig {
   char ssid[32];  // SSID (max 32 characters)
@@ -29,13 +62,12 @@ int alarmHour = 7;
 int alarmMinute = 30;
 
 // Pin definitions for gate control
-const int MOTOR_PWMA = 26;     // PWM motor
-const int MOTOR_AIN1 = 13;     // Direction 1
-const int MOTOR_AIN2 = 14;     // Direction 2
-const int MOTOR_STBY = 33;     // STANDBY
-const int BUTTON_PIN = 25;      // Manual button
-const int LIMIT_OPEN = 27;     // Limit switch open
-const int LIMIT_CLOSE = 32;    // Limit switch close
+const int MOTOR_PWMA = 12;     // PWM motor
+const int MOTOR_AIN1 = 14;     // Direction 1
+const int MOTOR_AIN2 = 27;     // Direction 2
+const int BUTTON_PIN = 5;      // Manual button
+const int LIMIT_OPEN = 18;     // Limit switch open
+const int LIMIT_CLOSE = 19;    // Limit switch close
 
 // States and directions
 enum GateState { CLOSED, OPEN, MOVING };
@@ -52,28 +84,27 @@ bool lastButtonState = HIGH;  // Last button state
 unsigned long lastDebounceTime = 0;  // Last debounce time
 
 // Motor parameters
-const int motorSpeed = 255;    // Speed 0-255
+const int motorSpeed = 128;    // Speed 0-255
 
 void IRAM_ATTR limitOpenISR() {
-  //Serial.println("[INTERRUPT] Limit switch OPEN.");
+  Serial.println("[INTERRUPT] Limit switch OPEN.");
   if (currentDirection == OPENING) {
     stopMotor();
     currentState = OPEN;
     currentDirection = STOPPED;
-    //Serial.println("[INTERRUPT] Limit switch OPEN reached. Gate fully open.");
+    Serial.println("[INTERRUPT] Limit switch OPEN reached. Gate fully open.");
   }
 }
 
 void IRAM_ATTR limitCloseISR() {
-  //Serial.println("[INTERRUPT] Limit switch CLOSE.");
+  Serial.println("[INTERRUPT] Limit switch CLOSE.");
   if (currentDirection == CLOSING) {
     stopMotor();
     currentState = CLOSED;
     currentDirection = STOPPED;
-    //Serial.println("[INTERRUPT] Limit switch CLOSE reached. Gate fully closed.");
+    Serial.println("[INTERRUPT] Limit switch CLOSE reached. Gate fully closed.");
   }
 }
-
 // Function to save WiFi credentials to persistent storage
 void saveConfig() {
   Serial.println("Saving WiFi configuration...");
@@ -253,14 +284,78 @@ void connectWiFi() {
   startAP();
 }
 
+//////////////////////////
+// TIME SYNCHRONIZATION (NTP)
+//////////////////////////
+
+// syncTime() attempts to synchronize time using NTP servers
+// 'mandatory' parameter forces sync even if already OK
+void syncTime(bool mandatory) {
+  // If sync is already OK and not mandatory, exit immediately
+  if (!mandatory && timeSyncStatus == SYNC_OK) return;
+
+  // Set status to sync in progress
+  timeSyncStatus = SYNC_IN_PROGRESS;
+
+  // Loop through the list of NTP servers
+  for (int s = 0; s < numNtpServers; s++) {
+    // Set the current NTP server
+    timeClient.setPoolServerName(ntpServers[s]);
+    // Set the time offset (3600 seconds = 1 hour for CET)
+    timeClient.setTimeOffset(3600);
+
+    Serial.print("\nTrying NTP server: ");
+    Serial.println(ntpServers[s]);
+
+    // Try the current server for the defined retries
+    for (int i = 0; i < NTP_RETRIES; i++) {
+      unsigned long startAttempt = millis();  // Record attempt start time
+      bool updated = false;
+
+      // Attempt to force time update within timeout
+      while (millis() - startAttempt < NTP_TIMEOUT) {
+        if (timeClient.forceUpdate()) {
+          updated = true;
+          break;
+        }
+        delay(100);  // Wait 100 ms before retrying
+      }
+
+      // If update successful and time is valid, set status to OK and return
+      if (updated && validateTime()) {
+        timeSyncStatus = SYNC_OK;
+        Serial.println("Sync successful!");
+        Serial.println("Time: " + timeClient.getFormattedTime());
+        return;
+      }
+      Serial.println("Attempt failed (" + String(i+1) + "/" + String(NTP_RETRIES) + ")");
+    }
+  }
+
+  // If no server succeeds, set sync status to fail
+  timeSyncStatus = SYNC_FAIL;
+  Serial.println("Error: All NTP servers failed!");
+}
+
+// validateTime() checks if the received timestamp is valid
+// Here, the time is valid if after January 1, 2023
+bool validateTime() {
+  time_t epochTime = timeClient.getEpochTime();
+  if (epochTime < 1672531200) {  // January 1, 2023
+    Serial.println("Invalid timestamp");
+    return false;
+  }
+  return true;
+}
+
 // Setup function (runs once at startup)
 void setup() {
   Serial.begin(115200);  // Initialize serial communication
   Serial.println("Setup started.");
 
   // Start AP if button is pressed at startup
-  pinMode(BUTTON_PIN, INPUT_PULLUP); // Configura il pin con pull-up interno
-  if (digitalRead(BUTTON_PIN) == LOW) {
+  pinMode(SWITCH_PIN, INPUT_PULLUP); // Configura il pin con pull-up interno
+  if (digitalRead(SWITCH_PIN) == LOW) {
     apMode = true;
     startAP();
     return;
@@ -270,6 +365,9 @@ void setup() {
   loadConfig();  // Load saved WiFi credentials
 
   connectWiFi();  // Try connecting with saved credentials
+
+  timeClient.begin();  // Initialize the NTP client
+  syncTime(true); // Force time synchronization
 
   if (!apMode) {
     Serial.print("Connected! IP address: ");
@@ -292,10 +390,6 @@ void setup() {
   pinMode(MOTOR_PWMA, OUTPUT);
   pinMode(MOTOR_AIN1, OUTPUT);
   pinMode(MOTOR_AIN2, OUTPUT);
-  pinMode(MOTOR_STBY, OUTPUT);
-
-  // Enable Motor
-  digitalWrite(MOTOR_STBY, HIGH);
 
   // Button and limit switch configuration
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -322,9 +416,14 @@ void loop() {
       connectionRetries = 0;  // Reset the retry counter
     }
   }
-  Serial.printf("Current state: %d\n", currentState);
-  Serial.printf("Current direction: %d\n", currentDirection);
-  
+
+  static unsigned long lastSync = 0;
+
+  if (millis() - lastSync > (NTP_INTERVAL * 1000)) {
+    syncTime(false);
+    lastSync = millis();
+  }
+
   checkButton();
   executeMovement();
   server.handleClient();  // Handle incoming client requests
@@ -429,3 +528,219 @@ void stopMotor() {
   digitalWrite(MOTOR_AIN2, LOW);
   Serial.println("[MOVEMENT] Motor stopped.");
 }
+
+/*
+# Include necessary libraries
+#include <WiFi.h>           // Library for WiFi connection
+#include <NTPClient.h>      // Library to get time via NTP
+#include <WiFiUdp.h>        // UDP library for NTPClient
+#include <Arduino.h>        // Base Arduino definitions
+
+// WiFi credentials: change these to your network
+const char* ssid = "Wokwi-GUEST";
+const char* password = "";
+
+// List of NTP servers in priority order
+const char* ntpServers[] = {
+  "pool.ntp.org",          // Main server (global)
+  "europe.pool.ntp.org",   // European server
+  "time.google.com",       // Google NTP server
+  "ntp1.inrim.it"          // Italian NTP server (INRIM)
+};
+const int numNtpServers = sizeof(ntpServers) / sizeof(ntpServers[0]);
+
+// NTP synchronization settings
+#define NTP_TIMEOUT 2000    // Timeout for each NTP attempt (2000 ms)
+#define NTP_RETRIES 3       // Number of attempts for each NTP server
+#define NTP_INTERVAL 3600   // Interval between syncs (3600 seconds = 1 hour)
+
+// UDP object for NTP communication
+WiFiUDP ntpUDP;
+
+// NTP client instance using the ntpUDP object
+NTPClient timeClient(ntpUDP);
+
+// Status LED pin: this LED indicates the sync status
+const int SYNC_LED = 2;
+
+// Enumeration representing the time synchronization status
+enum SyncStatus {
+  SYNC_IN_PROGRESS,  // Sync in progress
+  SYNC_OK,           // Sync successful
+  SYNC_FAIL          // Sync failed
+};
+
+// Global variable to store the sync status (initially failed)
+volatile SyncStatus timeSyncStatus = SYNC_FAIL;
+
+//////////////////////////
+// WIFI FUNCTIONS
+//////////////////////////
+
+// The initWiFi() function initializes the WiFi connection in Station mode
+void initWiFi() {
+  WiFi.mode(WIFI_STA);             // Set WiFi to Station mode (client)
+  WiFi.setAutoReconnect(true);     // Enable automatic reconnection
+  WiFi.begin(ssid, password);      // Start the connection with provided credentials
+  Serial.println("Connecting to WiFi...");
+}
+
+//////////////////////////
+// WIFI EVENT HANDLER
+//////////////////////////
+
+// WiFiEventHandler function handles WiFi events (e.g., disconnection, reconnection)
+void WiFiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch(event) {
+    // Case: WiFi disconnected
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.println("\nWiFi lost! Attempting to reconnect...");
+      WiFi.reconnect();             // Attempt to reconnect automatically
+      break;
+
+    // Case: WiFi connected and IP address assigned
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.print("\nWiFi connected! IP: ");
+      Serial.println(IPAddress(info.got_ip.ip_info.ip.addr));
+      // Force sync if not yet synchronized
+      if(timeSyncStatus != SYNC_OK) {
+        syncTime(true);
+      }
+      break;
+
+    default:
+      break;
+  }
+}
+
+//////////////////////////
+// TIME SYNCHRONIZATION (NTP)
+//////////////////////////
+
+// syncTime() attempts to synchronize time using NTP servers
+// 'mandatory' parameter forces sync even if already OK
+void syncTime(bool mandatory) {
+  // If sync is already OK and not mandatory, exit immediately
+  if (!mandatory && timeSyncStatus == SYNC_OK) return;
+
+  // Set status to sync in progress
+  timeSyncStatus = SYNC_IN_PROGRESS;
+
+  // Loop through the list of NTP servers
+  for (int s = 0; s < numNtpServers; s++) {
+    // Set the current NTP server
+    timeClient.setPoolServerName(ntpServers[s]);
+    // Set the time offset (3600 seconds = 1 hour for CET)
+    timeClient.setTimeOffset(3600);
+
+    Serial.print("\nTrying NTP server: ");
+    Serial.println(ntpServers[s]);
+
+    // Try the current server for the defined retries
+    for (int i = 0; i < NTP_RETRIES; i++) {
+      unsigned long startAttempt = millis();  // Record attempt start time
+      bool updated = false;
+
+      // Attempt to force time update within timeout
+      while (millis() - startAttempt < NTP_TIMEOUT) {
+        if (timeClient.forceUpdate()) {
+          updated = true;
+          break;
+        }
+        delay(100);  // Wait 100 ms before retrying
+      }
+
+      // If update successful and time is valid, set status to OK and return
+      if (updated && validateTime()) {
+        timeSyncStatus = SYNC_OK;
+        Serial.println("Sync successful!");
+        Serial.println("Time: " + timeClient.getFormattedTime());
+        return;
+      }
+      Serial.println("Attempt failed (" + String(i+1) + "/" + String(NTP_RETRIES) + ")");
+    }
+  }
+
+  // If no server succeeds, set sync status to fail
+  timeSyncStatus = SYNC_FAIL;
+  Serial.println("Error: All NTP servers failed!");
+}
+
+// validateTime() checks if the received timestamp is valid
+// Here, the time is valid if after January 1, 2023
+bool validateTime() {
+  time_t epochTime = timeClient.getEpochTime();
+  if (epochTime < 1672531200) {  // January 1, 2023
+    Serial.println("Invalid timestamp");
+    return false;
+  }
+  return true;
+}
+
+//////////////////////////
+// STATUS LED UPDATE
+//////////////////////////
+
+// updateStatusLED() updates the LED based on sync status
+// SYNC_OK: LED solid on
+// SYNC_IN_PROGRESS: LED blinks fast (200 ms)
+// SYNC_FAIL: LED blinks slow (1000 ms)
+void updateStatusLED() {
+  static unsigned long lastBlink = 0;  // Last LED update time
+  static bool ledState = false;        // Current LED state
+
+  switch (timeSyncStatus) {
+    case SYNC_OK:
+      digitalWrite(SYNC_LED, HIGH);  // LED on (sync successful)
+      break;
+
+    case SYNC_IN_PROGRESS:
+      if (millis() - lastBlink > 200) {
+        ledState = !ledState;
+        digitalWrite(SYNC_LED, ledState);
+        lastBlink = millis();
+      }
+      break;
+
+    case SYNC_FAIL:
+      if (millis() - lastBlink > 1000) {
+        ledState = !ledState;
+        digitalWrite(SYNC_LED, ledState);
+        lastBlink = millis();
+      }
+      break;
+  }
+}
+
+//////////////////////////
+// MAIN PROGRAM: setup() and loop()
+//////////////////////////
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(SYNC_LED, OUTPUT);
+
+  WiFi.onEvent(WiFiEventHandler);
+
+  initWiFi();
+
+  timeClient.begin();
+
+  syncTime(true);
+}
+
+void loop() {
+  static unsigned long lastSync = 0;
+
+  if (millis() - lastSync > (NTP_INTERVAL * 1000)) {
+    syncTime(false);
+    lastSync = millis();
+  }
+
+  updateStatusLED();
+
+  delay(100);
+}
+
+*/
