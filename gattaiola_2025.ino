@@ -77,7 +77,7 @@ enum GateState { CLOSED, OPEN, MOVING };
 enum Direction { STOPPED, OPENING, CLOSING };
 volatile GateState currentState = CLOSED;
 volatile Direction currentDirection = STOPPED;
-bool targetStateChanged = false;
+Direction lastDirection = STOPPED;
 
 // Debounce variables
 #define DEBOUNCE_DELAY 50  // Debounce delay in milliseconds
@@ -111,7 +111,7 @@ void IRAM_ATTR limitCloseISR() {
   }
 }
 // Function to save WiFi credentials to persistent storage
-void saveConfig() {
+void saveConfigWiFi() {
   Serial.println("Saving WiFi configuration...");
   preferences.begin("wifi", false);  // Open preferences namespace "wifi" in read/write mode
   preferences.putString("ssid", wifiConfig.ssid);  // Save SSID
@@ -121,7 +121,7 @@ void saveConfig() {
 }
 
 // Function to load WiFi credentials from persistent storage
-void loadConfig() {
+void loadConfigWiFi() {
   Serial.println("Loading WiFi configuration...");
   preferences.begin("wifi", true);  // Open preferences namespace "wifi" in read-only mode
   String ssid = preferences.getString("ssid", "");  // Load SSID (default: empty)
@@ -136,6 +136,28 @@ void loadConfig() {
   Serial.println(wifiConfig.ssid);
   Serial.print("Loaded Password: ");
   Serial.println(wifiConfig.password);
+}
+
+// Function to save Alarm Time to persistent storage
+void saveConfigAlarmTime() {
+  Serial.println("Saving Alarm Time configuration...");
+  preferences.begin("alarm", false);  // Open preferences namespace "alarm" in read/write mode
+  preferences.putInt("hour", alarmHour);  // Save alarm hour
+  preferences.putInt("minute", alarmMinute);  // Save alarm minute
+  preferences.end();  // Close preferences
+  Serial.println("Alarm time configuration saved.");
+}
+
+// Function to load Alarm Time from persistent storage
+void loadConfigAlarmTime() {
+  Serial.println("Loading Alarm Time configuration...");
+  preferences.begin("alarm", true);  // Open preferences namespace "alarm" in read-only mode
+  alarmHour = preferences.getInt("hour", 255);  // Load alarm hour (default: 255)
+  alarmMinute = preferences.getInt("minute", 255);  // Load alarm minute (default: 255)
+  preferences.end();  // Close preferences
+
+  Serial.println("Alarm Time configuration loaded.");
+  Serial.printf("Loaded Alarm Time: %02d:%02d\n", alarmHour, alarmMinute);
 }
 
 // Function to clear all preferences
@@ -164,7 +186,8 @@ void handleSetAlarm() {
     alarmHour = hour;
     alarmMinute = minute;
     server.send(200, "text/plain", "ok");
-    Serial.printf("Sveglia impostata alle: %02d:%02d\n", hour, minute);
+    Serial.printf("Sveglia impostata alle: %02d:%02d\n", alarmHour, alarmMinute);
+    saveConfigAlarmTime();
   } else {
     server.send(400, "text/plain", "invalid");
   }
@@ -244,7 +267,7 @@ void connectWiFi() {
         // Save the working credentials
         strncpy(wifiConfig.ssid, wifiList[i][0], sizeof(wifiConfig.ssid));
         strncpy(wifiConfig.password, wifiList[i][1], sizeof(wifiConfig.password));
-        saveConfig();  // Save the new credentials
+        saveConfigWiFi();  // Save the new credentials
 
         return;  // Exit if connected successfully
       }
@@ -337,7 +360,7 @@ void webServer() {
     newSSID.toCharArray(wifiConfig.ssid, sizeof(wifiConfig.ssid));
     newPass.toCharArray(wifiConfig.password, sizeof(wifiConfig.password));
 
-    saveConfig();  // Save the new credentials
+    saveConfigWiFi();  // Save the new credentials
     server.send(200, "text/plain", "Configurazione salvata! Riavvio...");  // Send confirmation
     delay(1000);  // Wait for the response to be sent
     ESP.restart();  // Restart the device to apply the new configuration
@@ -354,6 +377,16 @@ void webServer() {
   server.on("/set_alarm", handleSetAlarm);  // Handle setting the alarm
 
   server.begin();  // Start the web server
+}
+
+void enterInSleepMode(bool setAlarm = false) {
+  if(setAlarm) {
+    // Configura il timer per il deep sleep
+    esp_sleep_enable_timer_wakeup(60 * uS_TO_S_FACTOR);
+  }
+  // Entra in deep sleep
+  Serial.println("Entro in deep sleep...");
+  esp_deep_sleep_start();
 }
 
 // Setup function (runs once at startup)
@@ -390,8 +423,9 @@ void setup() {
     return;
   }
 
-  clearAllPreferences();  // Clear saved preferences
-  loadConfig();  // Load saved WiFi credentials
+  // clearAllPreferences();  // Clear saved preferences
+  loadConfigWiFi();  // Load saved WiFi credentials
+  loadConfigAlarmTime();  // Load saved alarm time
 
   connectWiFi();  // Try connecting with saved credentials
 
@@ -460,6 +494,12 @@ void loop() {
 
   checkButton();
   executeMovement();
+  if((lastDirection == CLOSING) && (currentDirection == STOPPED)){
+    enterInSleepMode(true);
+  }
+  if(lastDirection != currentDirection){
+    lastDirection = currentDirection;
+  }
   server.handleClient();  // Handle incoming client requests
 }
 
@@ -565,227 +605,3 @@ void stopMotor() {
   digitalWrite(MOTOR_AIN2, LOW);
   Serial.println("[MOVEMENT] Motor stopped.");
 }
-
-void enterInSleepMode() {
-  // Configura il timer per il deep sleep
-  esp_sleep_enable_timer_wakeup(60 * uS_TO_S_FACTOR);
-  // Entra in deep sleep
-  Serial.println("Entro in deep sleep...");
-  esp_deep_sleep_start();
-}
-
-/*
-# Include necessary libraries
-#include <WiFi.h>           // Library for WiFi connection
-#include <NTPClient.h>      // Library to get time via NTP
-#include <WiFiUdp.h>        // UDP library for NTPClient
-#include <Arduino.h>        // Base Arduino definitions
-
-// WiFi credentials: change these to your network
-const char* ssid = "Wokwi-GUEST";
-const char* password = "";
-
-// List of NTP servers in priority order
-const char* ntpServers[] = {
-  "pool.ntp.org",          // Main server (global)
-  "europe.pool.ntp.org",   // European server
-  "time.google.com",       // Google NTP server
-  "ntp1.inrim.it"          // Italian NTP server (INRIM)
-};
-const int numNtpServers = sizeof(ntpServers) / sizeof(ntpServers[0]);
-
-// NTP synchronization settings
-#define NTP_TIMEOUT 2000    // Timeout for each NTP attempt (2000 ms)
-#define NTP_RETRIES 3       // Number of attempts for each NTP server
-#define NTP_INTERVAL 3600   // Interval between syncs (3600 seconds = 1 hour)
-
-// UDP object for NTP communication
-WiFiUDP ntpUDP;
-
-// NTP client instance using the ntpUDP object
-NTPClient timeClient(ntpUDP);
-
-// Status LED pin: this LED indicates the sync status
-const int SYNC_LED = 2;
-
-// Enumeration representing the time synchronization status
-enum SyncStatus {
-  SYNC_IN_PROGRESS,  // Sync in progress
-  SYNC_OK,           // Sync successful
-  SYNC_FAIL          // Sync failed
-};
-
-// Global variable to store the sync status (initially failed)
-volatile SyncStatus timeSyncStatus = SYNC_FAIL;
-
-//////////////////////////
-// WIFI FUNCTIONS
-//////////////////////////
-
-// The initWiFi() function initializes the WiFi connection in Station mode
-void initWiFi() {
-  WiFi.mode(WIFI_STA);             // Set WiFi to Station mode (client)
-  WiFi.setAutoReconnect(true);     // Enable automatic reconnection
-  WiFi.begin(ssid, password);      // Start the connection with provided credentials
-  Serial.println("Connecting to WiFi...");
-}
-
-//////////////////////////
-// WIFI EVENT HANDLER
-//////////////////////////
-
-// WiFiEventHandler function handles WiFi events (e.g., disconnection, reconnection)
-void WiFiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info) {
-  switch(event) {
-    // Case: WiFi disconnected
-    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-      Serial.println("\nWiFi lost! Attempting to reconnect...");
-      WiFi.reconnect();             // Attempt to reconnect automatically
-      break;
-
-    // Case: WiFi connected and IP address assigned
-    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-      Serial.print("\nWiFi connected! IP: ");
-      Serial.println(IPAddress(info.got_ip.ip_info.ip.addr));
-      // Force sync if not yet synchronized
-      if(timeSyncStatus != SYNC_OK) {
-        syncTime(true);
-      }
-      break;
-
-    default:
-      break;
-  }
-}
-
-//////////////////////////
-// TIME SYNCHRONIZATION (NTP)
-//////////////////////////
-
-// syncTime() attempts to synchronize time using NTP servers
-// 'mandatory' parameter forces sync even if already OK
-void syncTime(bool mandatory) {
-  // If sync is already OK and not mandatory, exit immediately
-  if (!mandatory && timeSyncStatus == SYNC_OK) return;
-
-  // Set status to sync in progress
-  timeSyncStatus = SYNC_IN_PROGRESS;
-
-  // Loop through the list of NTP servers
-  for (int s = 0; s < numNtpServers; s++) {
-    // Set the current NTP server
-    timeClient.setPoolServerName(ntpServers[s]);
-    // Set the time offset (3600 seconds = 1 hour for CET)
-    timeClient.setTimeOffset(3600);
-
-    Serial.print("\nTrying NTP server: ");
-    Serial.println(ntpServers[s]);
-
-    // Try the current server for the defined retries
-    for (int i = 0; i < NTP_RETRIES; i++) {
-      unsigned long startAttempt = millis();  // Record attempt start time
-      bool updated = false;
-
-      // Attempt to force time update within timeout
-      while (millis() - startAttempt < NTP_TIMEOUT) {
-        if (timeClient.forceUpdate()) {
-          updated = true;
-          break;
-        }
-        delay(100);  // Wait 100 ms before retrying
-      }
-
-      // If update successful and time is valid, set status to OK and return
-      if (updated && validateTime()) {
-        timeSyncStatus = SYNC_OK;
-        Serial.println("Sync successful!");
-        Serial.println("Time: " + timeClient.getFormattedTime());
-        return;
-      }
-      Serial.println("Attempt failed (" + String(i+1) + "/" + String(NTP_RETRIES) + ")");
-    }
-  }
-
-  // If no server succeeds, set sync status to fail
-  timeSyncStatus = SYNC_FAIL;
-  Serial.println("Error: All NTP servers failed!");
-}
-
-// validateTime() checks if the received timestamp is valid
-// Here, the time is valid if after January 1, 2023
-bool validateTime() {
-  time_t epochTime = timeClient.getEpochTime();
-  if (epochTime < 1672531200) {  // January 1, 2023
-    Serial.println("Invalid timestamp");
-    return false;
-  }
-  return true;
-}
-
-//////////////////////////
-// STATUS LED UPDATE
-//////////////////////////
-
-// updateStatusLED() updates the LED based on sync status
-// SYNC_OK: LED solid on
-// SYNC_IN_PROGRESS: LED blinks fast (200 ms)
-// SYNC_FAIL: LED blinks slow (1000 ms)
-void updateStatusLED() {
-  static unsigned long lastBlink = 0;  // Last LED update time
-  static bool ledState = false;        // Current LED state
-
-  switch (timeSyncStatus) {
-    case SYNC_OK:
-      digitalWrite(SYNC_LED, HIGH);  // LED on (sync successful)
-      break;
-
-    case SYNC_IN_PROGRESS:
-      if (millis() - lastBlink > 200) {
-        ledState = !ledState;
-        digitalWrite(SYNC_LED, ledState);
-        lastBlink = millis();
-      }
-      break;
-
-    case SYNC_FAIL:
-      if (millis() - lastBlink > 1000) {
-        ledState = !ledState;
-        digitalWrite(SYNC_LED, ledState);
-        lastBlink = millis();
-      }
-      break;
-  }
-}
-
-//////////////////////////
-// MAIN PROGRAM: setup() and loop()
-//////////////////////////
-
-void setup() {
-  Serial.begin(115200);
-
-  pinMode(SYNC_LED, OUTPUT);
-
-  WiFi.onEvent(WiFiEventHandler);
-
-  initWiFi();
-
-  timeClient.begin();
-
-  syncTime(true);
-}
-
-void loop() {
-  static unsigned long lastSync = 0;
-
-  if (millis() - lastSync > (NTP_INTERVAL * 1000)) {
-    syncTime(false);
-    lastSync = millis();
-  }
-
-  updateStatusLED();
-
-  delay(100);
-}
-
-*/
