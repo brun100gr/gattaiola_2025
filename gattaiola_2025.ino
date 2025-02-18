@@ -7,6 +7,8 @@
 #include "html_set_alarm.h"  // HTML content for the alarm configuration page
 #include <NTPClient.h>      // Library to get time via NTP
 #include <WiFiUdp.h>        // UDP library for NTPClient
+#include <driver/rtc_io.h>
+
 
 #define MAX_RETRIES 5  // Maximum number of connection retries before starting AP mode
 
@@ -14,6 +16,8 @@
 #define NTP_TIMEOUT 2000    // Timeout for each NTP attempt (2000 ms)
 #define NTP_RETRIES 3       // Number of attempts for each NTP server
 #define NTP_INTERVAL 3600   // Interval between syncs (3600 seconds = 1 hour)
+
+#define uS_TO_S_FACTOR 1000000  // Conversion factor for microseconds to seconds
 
 WebServer server(80);  // Web server running on port 80
 Preferences preferences;  // Used for persistent storage of WiFi credentials
@@ -357,6 +361,23 @@ void setup() {
   Serial.begin(115200);  // Initialize serial communication
   Serial.println("Setup started.");
 
+  // Identifica la causa del risveglio
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
+  if (cause == ESP_SLEEP_WAKEUP_UNDEFINED) {
+    Serial.println("Riavvio da alimentazione");
+  }
+  else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+    Serial.println("Risveglio dal timer");
+  }
+  else if (cause == ESP_SLEEP_WAKEUP_EXT0) {
+    Serial.println("Risveglio da pulsante");
+    Serial.printf("Pulsante premuto sul GPIO: %d\n", BUTTON_PIN);
+  }
+  else {
+    Serial.println("Risveglio da causa sconosciuta");
+  }
+
   // Button and limit switches configuration
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LIMIT_OPEN, INPUT_PULLUP);
@@ -408,6 +429,14 @@ void setup() {
 
   // Initialize motor stopped
   stopMotor();
+
+  // Configura il pulsante con pull-up interno
+  rtc_gpio_pullup_en((gpio_num_t)BUTTON_PIN);      // Abilita pull-up
+  rtc_gpio_pulldown_dis((gpio_num_t)BUTTON_PIN);   // Disabilita pull-down
+  rtc_gpio_set_direction((gpio_num_t)BUTTON_PIN, RTC_GPIO_MODE_INPUT_ONLY);
+  
+  // Abilita il risveglio sul fronte LOW del pulsante
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, LOW);
 
   Serial.println("Setup completed.");
 }
@@ -526,6 +555,7 @@ void closeGate() {
   } else {
     Serial.println("[MOVEMENT] Gate already closed. No action.");
   }
+
 }
 
 // Function to stop the motor
@@ -534,6 +564,14 @@ void stopMotor() {
   digitalWrite(MOTOR_AIN1, LOW);
   digitalWrite(MOTOR_AIN2, LOW);
   Serial.println("[MOVEMENT] Motor stopped.");
+}
+
+void enterInSleepMode() {
+  // Configura il timer per il deep sleep
+  esp_sleep_enable_timer_wakeup(60 * uS_TO_S_FACTOR);
+  // Entra in deep sleep
+  Serial.println("Entro in deep sleep...");
+  esp_deep_sleep_start();
 }
 
 /*
