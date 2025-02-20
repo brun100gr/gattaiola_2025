@@ -1,4 +1,3 @@
-#define CONFIG_ESP32_SPIRAM_SUPPORT 0
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
@@ -17,7 +16,7 @@
 #define NTP_RETRIES 3       // Number of attempts for each NTP server
 #define NTP_INTERVAL 3600   // Interval between syncs (3600 seconds = 1 hour)
 
-#define uS_TO_S_FACTOR 1000000  // Conversion factor for microseconds to seconds
+#define uS_TO_S_FACTOR 1000000LL  // Conversion factor for microseconds to seconds
 
 WebServer server(80);  // Web server running on port 80
 Preferences preferences;  // Used for persistent storage of WiFi credentials
@@ -60,8 +59,8 @@ bool apMode = false;  // Flag to indicate if the device is in Access Point mode
 const char AP_SSID_PREFIX[] = "ESP32-Config-";  // Prefix for the AP SSID
 
 // Variables for the alarm (initially set to 7:30)
-int alarmHour = 7;
-int alarmMinute = 30;
+int alarmHour = 255;
+int alarmMinute = 255;
 
 // Pin definitions for gate control
 const int MOTOR_PWMA = 26;     // PWM motor
@@ -79,6 +78,9 @@ volatile GateState currentState = CLOSED;
 volatile Direction currentDirection = STOPPED;
 Direction lastDirection = STOPPED;
 
+// Motor stop flag
+volatile bool stopMotorFlag = false;
+
 // Debounce variables
 #define DEBOUNCE_DELAY 50  // Debounce delay in milliseconds
 
@@ -90,24 +92,18 @@ unsigned long lastDebounceTime = 0;  // Last debounce time
 const int motorSpeed = 255;    // Speed 0-255
 
 void IRAM_ATTR limitOpenISR() {
-  // Serial.println("[INTERRUPT] Limit switch OPEN.");
   if (currentDirection == OPENING) {
-    stopMotor();
+    stopMotorFlag = true;
     currentState = OPEN;
     currentDirection = STOPPED;
-    digitalWrite(MOTOR_STBY, LOW);
-    // Serial.println("[INTERRUPT] Limit switch OPEN reached. Gate fully open.");
   }
 }
 
 void IRAM_ATTR limitCloseISR() {
-  // Serial.println("[INTERRUPT] Limit switch CLOSE.");
   if (currentDirection == CLOSING) {
-    stopMotor();
+    stopMotorFlag = true;
     currentState = CLOSED;
     currentDirection = STOPPED;
-    digitalWrite(MOTOR_STBY, LOW);
-    // Serial.println("[INTERRUPT] Limit switch CLOSE reached. Gate fully closed.");
   }
 }
 // Function to save WiFi credentials to persistent storage
@@ -379,11 +375,49 @@ void webServer() {
   server.begin();  // Start the web server
 }
 
+// Function to calculate the seconds remaining until the next occurrence of a specific time (hour and minute)
+unsigned long secondsUntilNextOccurrence() {
+  // Get the current time in seconds since epoch
+  time_t now = timeClient.getEpochTime();
+  
+  // Break down the current time into components
+  struct tm *timeInfo = localtime(&now);
+  int currentHour = timeInfo->tm_hour;
+  int currentMinute = timeInfo->tm_min;
+  int currentSecond = timeInfo->tm_sec;
+
+  // Calculate the target time in seconds since midnight
+  int targetTimeInSeconds = alarmHour * 3600 + alarmMinute * 60;
+
+  // Calculate the current time in seconds since midnight
+  int currentTimeInSeconds = currentHour * 3600 + currentMinute * 60 + currentSecond;
+
+  // Calculate the difference in seconds
+  int secondsUntilTarget = targetTimeInSeconds - currentTimeInSeconds;
+
+  // If the target time is earlier in the day, add 24 hours to the difference
+  if (secondsUntilTarget < 0) {
+    secondsUntilTarget += 24 * 3600;
+  }
+
+  return secondsUntilTarget;
+}
+
 void enterInSleepMode(bool setAlarm = false) {
   if(setAlarm) {
+    long secondsUntilNextWakeup = secondsUntilNextOccurrence();
     // Configura il timer per il deep sleep
-    esp_sleep_enable_timer_wakeup(60 * uS_TO_S_FACTOR);
+    esp_sleep_enable_timer_wakeup(secondsUntilNextWakeup * uS_TO_S_FACTOR);
+    Serial.printf("Risveglio programmato tra %d secondi\n", secondsUntilNextWakeup);
   }
+
+  // Configura il pulsante con pull-up interno
+  rtc_gpio_pullup_en((gpio_num_t)BUTTON_PIN);      // Abilita pull-up
+  rtc_gpio_pulldown_dis((gpio_num_t)BUTTON_PIN);   // Disabilita pull-down
+  rtc_gpio_set_direction((gpio_num_t)BUTTON_PIN, RTC_GPIO_MODE_INPUT_ONLY);
+  
+  // Abilita il risveglio sul fronte LOW del pulsante
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, LOW);
   // Entra in deep sleep
   Serial.println("Entro in deep sleep...");
   esp_deep_sleep_start();
@@ -394,6 +428,33 @@ void setup() {
   Serial.begin(115200);  // Initialize serial communication
   Serial.println("Setup started.");
 
+  // Motor pin configuration
+  pinMode(MOTOR_PWMA, OUTPUT);
+  pinMode(MOTOR_AIN1, OUTPUT);
+  pinMode(MOTOR_AIN2, OUTPUT);
+  pinMode(MOTOR_STBY, OUTPUT);
+
+  // Button and limit switches configuration
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LIMIT_OPEN, INPUT_PULLUP);
+  pinMode(LIMIT_CLOSE, INPUT_PULLUP);
+
+  if (digitalRead(LIMIT_OPEN) == LOW) {
+    currentState = OPEN;
+    Serial.println("Gate OPEN");
+  } else if (digitalRead(LIMIT_CLOSE) == LOW) {
+    currentState = CLOSED;
+    Serial.println("Gate CLOSE");
+  } else {
+    Serial.println("Gate position UNKNOWN.");
+  }
+
+  // Interrupts for limit switches
+  attachInterrupt(digitalPinToInterrupt(LIMIT_OPEN), limitOpenISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(LIMIT_CLOSE), limitCloseISR, FALLING);
+  // Initialize motor stopped
+  //stopMotor();
+
   // Identifica la causa del risveglio
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
 
@@ -402,19 +463,21 @@ void setup() {
   }
   else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
     Serial.println("Risveglio dal timer");
+    openGate();
   }
   else if (cause == ESP_SLEEP_WAKEUP_EXT0) {
     Serial.println("Risveglio da pulsante");
-    Serial.printf("Pulsante premuto sul GPIO: %d\n", BUTTON_PIN);
+    if(currentState == OPEN){
+      Serial.print("Close Gate");
+      closeGate();
+    } else if (currentState == CLOSED){
+      Serial.print("Open Gate");
+      openGate();
+    }
   }
   else {
     Serial.println("Risveglio da causa sconosciuta");
   }
-
-  // Button and limit switches configuration
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(LIMIT_OPEN, INPUT_PULLUP);
-  pinMode(LIMIT_CLOSE, INPUT_PULLUP);
 
   // Start in Access Point mode if both limits are pressed
   if ((digitalRead(LIMIT_OPEN) == LOW) && (digitalRead(LIMIT_CLOSE) == LOW)) {
@@ -441,42 +504,16 @@ void setup() {
     Serial.println("Web server started in normal mode.");
   }
 
-  // Motor pin configuration
-  pinMode(MOTOR_PWMA, OUTPUT);
-  pinMode(MOTOR_AIN1, OUTPUT);
-  pinMode(MOTOR_AIN2, OUTPUT);
-  pinMode(MOTOR_STBY, OUTPUT);
-
-  // Interrupts for limit switches
-  attachInterrupt(digitalPinToInterrupt(LIMIT_OPEN), limitOpenISR, FALLING);
-  attachInterrupt(digitalPinToInterrupt(LIMIT_CLOSE), limitCloseISR, FALLING);
-
-  if (digitalRead(LIMIT_OPEN) == LOW) {
-    currentState = OPEN;
-    Serial.println("Gate OPEN");
-  } else if (digitalRead(LIMIT_CLOSE) == LOW) {
-    currentState = CLOSED;
-    Serial.println("Gate CLOSE");
-  } else {
-    Serial.println("Gate position UNKNOWN.");
-  }
-
-  // Initialize motor stopped
-  stopMotor();
-
-  // Configura il pulsante con pull-up interno
-  rtc_gpio_pullup_en((gpio_num_t)BUTTON_PIN);      // Abilita pull-up
-  rtc_gpio_pulldown_dis((gpio_num_t)BUTTON_PIN);   // Disabilita pull-down
-  rtc_gpio_set_direction((gpio_num_t)BUTTON_PIN, RTC_GPIO_MODE_INPUT_ONLY);
-  
-  // Abilita il risveglio sul fronte LOW del pulsante
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, LOW);
-
   Serial.println("Setup completed.");
 }
 
 // Loop function (runs repeatedly)
 void loop() {
+  if (stopMotorFlag) {
+    stopMotor();
+    stopMotorFlag = false;
+  }
+
   if (!apMode && WiFi.status() != WL_CONNECTED) {  // Check if disconnected in normal mode
     if (++connectionRetries >= MAX_RETRIES) {  // Increment retry counter
       Serial.println("Connection lost, retrying...");
@@ -494,8 +531,12 @@ void loop() {
 
   checkButton();
   executeMovement();
+  // Serial.printf("Last direction: %d, Current direction: %d\n", lastDirection, currentDirection);
   if((lastDirection == CLOSING) && (currentDirection == STOPPED)){
     enterInSleepMode(true);
+  }
+  if((lastDirection == OPENING) && (currentDirection == STOPPED)){
+    enterInSleepMode();
   }
   if(lastDirection != currentDirection){
     lastDirection = currentDirection;
@@ -595,7 +636,6 @@ void closeGate() {
   } else {
     Serial.println("[MOVEMENT] Gate already closed. No action.");
   }
-
 }
 
 // Function to stop the motor
@@ -603,5 +643,7 @@ void stopMotor() {
   analogWrite(MOTOR_PWMA, 0);
   digitalWrite(MOTOR_AIN1, LOW);
   digitalWrite(MOTOR_AIN2, LOW);
+  digitalWrite(MOTOR_STBY, LOW);
   Serial.println("[MOVEMENT] Motor stopped.");
 }
+
