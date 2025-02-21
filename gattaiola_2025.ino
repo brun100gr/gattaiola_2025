@@ -18,6 +18,8 @@
 
 #define uS_TO_S_FACTOR 1000000LL  // Conversion factor for microseconds to seconds
 
+#define ACTIVE_TIME_BEFORE_SLEEP 300 // seconds
+
 WebServer server(80);  // Web server running on port 80
 Preferences preferences;  // Used for persistent storage of WiFi credentials
 
@@ -74,9 +76,11 @@ const int LIMIT_CLOSE = 32;    // Limit switch close
 // States and directions
 enum GateState { CLOSED, OPEN, MOVING };
 enum Direction { STOPPED, OPENING, CLOSING };
+enum WakeupCause { POWERRESET, BUTTON, TIMER, UNKNOWN };
 volatile GateState currentState = CLOSED;
 volatile Direction currentDirection = STOPPED;
 Direction lastDirection = STOPPED;
+WakeupCause wakeupCause = UNKNOWN;
 
 // Motor stop flag
 volatile bool stopMotorFlag = false;
@@ -106,6 +110,7 @@ void IRAM_ATTR limitCloseISR() {
     currentDirection = STOPPED;
   }
 }
+
 // Function to save WiFi credentials to persistent storage
 void saveConfigWiFi() {
   Serial.println("Saving WiFi configuration...");
@@ -460,12 +465,15 @@ void setup() {
 
   if (cause == ESP_SLEEP_WAKEUP_UNDEFINED) {
     Serial.println("Riavvio da alimentazione");
+    wakeupCause = POWERRESET;
   }
   else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
     Serial.println("Risveglio dal timer");
+    wakeupCause = TIMER;
     openGate();
   }
   else if (cause == ESP_SLEEP_WAKEUP_EXT0) {
+    wakeupCause = BUTTON;
     Serial.println("Risveglio da pulsante");
     if(currentState == OPEN){
       Serial.print("Close Gate");
@@ -477,6 +485,7 @@ void setup() {
   }
   else {
     Serial.println("Risveglio da causa sconosciuta");
+    wakeupCause = UNKNOWN;
   }
 
   // Start in Access Point mode if both limits are pressed
@@ -527,6 +536,14 @@ void loop() {
   if (millis() - lastSync > (NTP_INTERVAL * 1000)) {
     syncTime(false);
     lastSync = millis();
+  }
+
+  if(wakeupCause == POWERRESET) {
+    static unsigned long wakeUpTime = 0;
+    if (millis() - wakeupCause > (ACTIVE_TIME_BEFORE_SLEEP * 1000))
+    {
+      enterInSleepMode(true);
+    }
   }
 
   checkButton();
