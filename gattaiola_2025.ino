@@ -1,9 +1,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
-#include "html_wifi_configuration.h"  // HTML content for the configuration page
+#include "html_configuration.h"  // HTML content for the configuration page
 #include "secrets.h"  // File containing predefined WiFi networks (SSID and password)
-#include "html_set_alarm.h"  // HTML content for the alarm configuration page
 #include <NTPClient.h>      // Library to get time via NTP
 #include <WiFiUdp.h>        // UDP library for NTPClient
 #include <driver/rtc_io.h>

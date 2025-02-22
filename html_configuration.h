@@ -27,7 +27,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawliteral(
         .form-group { 
             margin: 20px 0;
         }
-        input { 
+        input, label { 
             padding: 8px; 
             width: 100%;
             max-width: 200px;
@@ -66,10 +66,16 @@ const char CONFIG_HTML[] PROGMEM = R"rawliteral(
             <h2>Configurazione WiFi</h2>
             <form action="/configure" method="POST">
                 <div class="form-group">
-                    <input type="text" name="ssid" placeholder="SSID" required>
+                    <input type="text" name="ssid" placeholder="SSID" value="%SSID%" required>
                 </div>
                 <div class="form-group">
-                    <input type="password" name="password" placeholder="Password" required>
+                    <input type="password" id="password" name="password" placeholder="Password" value="%PASSWORD%" required>
+                </div>
+                <div class="form-group">
+                    <div class="form-group">
+                        <input type="checkbox" id="show-password" onclick="togglePassword()">
+                        <label for="show-password">Mostra Password</label>
+                    </div>
                 </div>
                 <div class="form-group">
                     <button type="submit">Salva e Riavvia</button>
@@ -127,6 +133,16 @@ const char CONFIG_HTML[] PROGMEM = R"rawliteral(
                     data === "invalid" ? "--:--" : `${hour}:${minute}`;
             })
             .catch(error => console.error("Errore:", error));
+    }
+
+    function togglePassword() {
+        const passwordField = document.getElementById("password");
+        const showPasswordCheckbox = document.getElementById("show-password");
+        if (showPasswordCheckbox.checked) {
+            passwordField.type = "text";
+        } else {
+            passwordField.type = "password";
+        }
     }
     </script>
 </body>
