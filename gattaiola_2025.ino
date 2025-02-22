@@ -178,6 +178,19 @@ String getAlarmTime() {
   return String(alarmHour).c_str() + String(":") + String(alarmMinute).c_str();
 }
 
+// Function to get the current WiFi credentials as a string
+String getWiFiCredentials() {
+  String ssid = wifiConfig.ssid;
+  String password = wifiConfig.password;
+  if (ssid.length() == 0) {
+    ssid = "default_ssid";
+  }
+  if (password.length() == 0) {
+    password = "default_password";
+  }
+  return ssid + "," + password;
+}
+
 // Handler for setting the alarm
 void handleSetAlarm() {
   int hour = server.arg("hour").toInt();
@@ -201,8 +214,17 @@ void handleGetAlarm() {
 
 // Handler for the root URL (serves the alarm configuration page)
 void handleRoot() {
-  String page = HTML;
+  String page = CONFIG_HTML;
   page.replace("%ALARM_TIME%", getAlarmTime());
+
+  String credentials = getWiFiCredentials();
+  int commaIndex = credentials.indexOf(',');
+  String ssid = credentials.substring(0, commaIndex);
+  String password = credentials.substring(commaIndex + 1);
+
+  page.replace("%SSID%", ssid);
+  page.replace("%PASSWORD%", password);
+
   server.send(200, "text/html", page);
 }
 
@@ -346,11 +368,7 @@ bool validateTime() {
 
 void webServer() {
   // Define routes for the web server in AP mode
-  server.on("/", []() {
-    String page = CONFIG_HTML;
-    page.replace("%ALARM_TIME%", getAlarmTime());
-    server.send(200, "text/html", page);  // Serve the configuration page
-  });
+  server.on("/", handleRoot);
 
   server.on("/configure", HTTP_POST, []() {
     // Handle form submission for new WiFi credentials
@@ -475,6 +493,8 @@ void setup() {
   else if (cause == ESP_SLEEP_WAKEUP_EXT0) {
     wakeupCause = BUTTON;
     Serial.println("Risveglio da pulsante");
+    handleButtonPress();
+    return;
     if(currentState == OPEN){
       Serial.print("Close Gate");
       closeGate();
